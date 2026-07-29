@@ -18,7 +18,10 @@ Email: bingye@umich.edu
 
 
 # Standard library imports.
+import csv
 import logging
+import os
+import shutil
 import sys
 from .gui_app_icon import set_frame_icon, setup_application_icons
 
@@ -31,6 +34,7 @@ logger.debug('loading %s', __file__)
 # Related third party imports.
 import wx
 import wx.aui
+import wx.dataview
 import wx.html
 import wx.lib.agw.hyperlink as hl
 import webbrowser
@@ -46,6 +50,157 @@ from .gui_preprocessor import PanelLv2_ProcessVideos,PanelLv2_DrawMarkers
 from .gui_analyzer import PanelLv2_AnalyzeBehaviors,PanelLv2_MineResults,PanelLv2_PlotBehaviors,PanelLv2_CalculateDistances
 from LabGym import selftest
 
+
+
+class CategorizerLibraryDialog(wx.Dialog):
+
+	def __init__(self, parent, models_dir):
+		super().__init__(parent, title='Categorizer Library',
+		                 style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+		                 size=(660, 460))
+		self._models_dir = models_dir
+		self._cats = []
+		self._build_ui()
+		self._refresh()
+		self.Centre()
+
+	def _build_ui(self):
+		vs = wx.BoxSizer(wx.VERTICAL)
+
+		toolbar = wx.BoxSizer(wx.HORIZONTAL)
+		self._btn_export = wx.Button(self, label='Export')
+		self._btn_rename = wx.Button(self, label='Rename')
+		self._btn_refresh = wx.Button(self, label='Refresh')
+		self._btn_export.Bind(wx.EVT_BUTTON, self._on_export)
+		self._btn_rename.Bind(wx.EVT_BUTTON, self._on_rename)
+		self._btn_refresh.Bind(wx.EVT_BUTTON, self._on_refresh)
+		toolbar.Add(self._btn_export, 0, wx.RIGHT, 6)
+		toolbar.Add(self._btn_rename, 0, wx.RIGHT, 6)
+		toolbar.Add(self._btn_refresh, 0)
+		vs.Add(toolbar, 0, wx.ALL, 10)
+
+		self._dvlc = wx.dataview.DataViewListCtrl(
+			self, style=wx.dataview.DV_ROW_LINES | wx.dataview.DV_HORIZ_RULES)
+		self._dvlc.AppendToggleColumn('', width=36)
+		self._dvlc.AppendTextColumn('Name', width=220)
+		self._dvlc.AppendTextColumn('Pattern Recognizer Dim', width=185)
+		self._dvlc.AppendTextColumn('Animation Analyzer Dim', width=185)
+		self._dvlc.Bind(wx.dataview.EVT_DATAVIEW_ITEM_VALUE_CHANGED,
+		                lambda _e: self._update_button_states())
+		vs.Add(self._dvlc, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+
+		self._lbl_empty = wx.StaticText(self, label='No categorizers found.',
+		                                style=wx.ALIGN_CENTER)
+		self._lbl_empty.Hide()
+		vs.Add(self._lbl_empty, 0, wx.ALIGN_CENTER | wx.BOTTOM, 20)
+
+		self.SetSizer(vs)
+		self._update_button_states()
+
+	def _load_categorizers(self):
+		cats = []
+		try:
+			entries = sorted(os.listdir(self._models_dir))
+		except OSError:
+			return cats
+		for name in entries:
+			path = os.path.join(self._models_dir, name)
+			if not os.path.isdir(path):
+				continue
+			params_file = os.path.join(path, 'model_parameters.txt')
+			dim_conv = 'unknown'
+			dim_tconv = 'unknown'
+			try:
+				with open(params_file, 'r') as f:
+					reader = csv.DictReader(f)
+					row = next(reader)
+					dim_conv = row.get('dim_conv', 'unknown').strip()
+					dim_tconv = row.get('dim_tconv', 'unknown').strip()
+			except (OSError, StopIteration, KeyError):
+				pass
+			cats.append({'name': name, 'path': path,
+			             'dim_conv': dim_conv, 'dim_tconv': dim_tconv})
+		return cats
+
+	def _refresh(self, event=None):
+		self._dvlc.DeleteAllItems()
+		self._cats = self._load_categorizers()
+		if not self._cats:
+			self._dvlc.Hide()
+			self._lbl_empty.Show()
+		else:
+			self._lbl_empty.Hide()
+			self._dvlc.Show()
+			for cat in self._cats:
+				self._dvlc.AppendItem(
+					[False, cat['name'], cat['dim_conv'], cat['dim_tconv']])
+		self._update_button_states()
+		self.Layout()
+
+	def _on_refresh(self, event):
+		self._refresh()
+
+	def _get_checked_indices(self):
+		checked = []
+		for i in range(self._dvlc.GetItemCount()):
+			if self._dvlc.GetToggleValue(i, 0):
+				checked.append(i)
+		return checked
+
+	def _update_button_states(self):
+		n = len(self._get_checked_indices())
+		self._btn_export.Enable(n > 0)
+		self._btn_rename.Enable(n == 1)
+
+	def _on_export(self, event):
+		checked = self._get_checked_indices()
+		if not checked:
+			return
+		with wx.DirDialog(self, 'Select destination folder') as dlg:
+			if dlg.ShowModal() != wx.ID_OK:
+				return
+			dest = dlg.GetPath()
+		errors = []
+		for i in checked:
+			cat = self._cats[i]
+			target = os.path.join(dest, cat['name'])
+			try:
+				shutil.copytree(cat['path'], target)
+			except Exception as e:
+				errors.append(f"{cat['name']}: {e}")
+		if errors:
+			wx.MessageBox('Some exports failed:\n' + '\n'.join(errors),
+			              'Export Errors', wx.OK | wx.ICON_WARNING, self)
+		else:
+			n = len(checked)
+			wx.MessageBox(
+				f"Exported {n} categorizer{'s' if n > 1 else ''} to:\n{dest}",
+				'Export Complete', wx.OK | wx.ICON_INFORMATION, self)
+
+	def _on_rename(self, event):
+		checked = self._get_checked_indices()
+		if len(checked) != 1:
+			return
+		cat = self._cats[checked[0]]
+		with wx.TextEntryDialog(self, 'Enter new name:', 'Rename Categorizer',
+		                        cat['name']) as dlg:
+			if dlg.ShowModal() != wx.ID_OK:
+				return
+			new_name = dlg.GetValue().strip()
+		if not new_name or new_name == cat['name']:
+			return
+		new_path = os.path.join(self._models_dir, new_name)
+		if os.path.exists(new_path):
+			wx.MessageBox(f'A categorizer named "{new_name}" already exists.',
+			              'Rename Failed', wx.OK | wx.ICON_ERROR, self)
+			return
+		try:
+			os.rename(cat['path'], new_path)
+		except OSError as e:
+			wx.MessageBox(f'Rename failed: {e}', 'Error',
+			              wx.OK | wx.ICON_ERROR, self)
+			return
+		self._refresh()
 
 
 class InitialPanel(wx.Panel):
@@ -77,18 +232,31 @@ class InitialPanel(wx.Panel):
 		boxsizer.Add(0,50,0)
 
 		module_modules=wx.BoxSizer(wx.HORIZONTAL)
+
+		col_preprocess=wx.BoxSizer(wx.VERTICAL)
 		button_preprocess=wx.Button(panel,label='Preprocessing Module',size=(250,40))
 		button_preprocess.Bind(wx.EVT_BUTTON,self.window_preprocess)
 		wx.Button.SetToolTip(button_preprocess,'Enhance video contrast / crop frames to exclude unnecessary region / trim videos to only keep necessary time windows.')
+		col_preprocess.Add(button_preprocess,0,wx.EXPAND)
+		module_modules.Add(col_preprocess,0,wx.LEFT|wx.RIGHT,10)
+
+		col_train=wx.BoxSizer(wx.VERTICAL)
 		button_train=wx.Button(panel,label='Training Module',size=(250,40))
 		button_train.Bind(wx.EVT_BUTTON,self.window_train)
 		wx.Button.SetToolTip(button_train,'Teach LabGym to recognize the animals / objects of your interest and identify their behaviors that are defined by you.')
+		col_train.Add(button_train,0,wx.EXPAND)
+		module_modules.Add(col_train,0,wx.LEFT|wx.RIGHT,10)
+
+		col_analyze=wx.BoxSizer(wx.VERTICAL)
 		button_analyze=wx.Button(panel,label='Analysis Module',size=(250,40))
 		button_analyze.Bind(wx.EVT_BUTTON,self.window_analyze)
 		wx.Button.SetToolTip(button_analyze,'Use LabGym to track the animals / objects of your interest, identify and quantify their behaviors, and display the statistically significant findings.')
-		module_modules.Add(button_preprocess,0,wx.LEFT|wx.RIGHT|wx.EXPAND,10)
-		module_modules.Add(button_train,0,wx.LEFT|wx.RIGHT|wx.EXPAND,10)
-		module_modules.Add(button_analyze,0,wx.LEFT|wx.RIGHT|wx.EXPAND,10)
+		col_analyze.Add(button_analyze,0,wx.EXPAND)
+		button_cat_lib=wx.Button(panel,label='Categorizer Library',size=(200,30))
+		button_cat_lib.Bind(wx.EVT_BUTTON,self.open_categorizer_library)
+		col_analyze.Add(button_cat_lib,0,wx.ALIGN_CENTER|wx.TOP,8)
+		module_modules.Add(col_analyze,0,wx.LEFT|wx.RIGHT,10)
+
 		boxsizer.Add(module_modules,0,wx.ALIGN_CENTER,50)
 		boxsizer.Add(0,50,0)
 
@@ -117,6 +285,16 @@ class InitialPanel(wx.Panel):
 
 		title = 'Analysis Module'
 		add_or_select_notebook_page(self.notebook, lambda: PanelLv1_AnalysisModule(self.notebook), title)
+
+
+	def open_categorizer_library(self,event):
+		"""Open the Categorizer Library dialog."""
+
+		from LabGym import config
+		models_dir=config.get_config()['models']
+		dlg=CategorizerLibraryDialog(self,models_dir)
+		dlg.ShowModal()
+		dlg.Destroy()
 
 
 
