@@ -18,11 +18,9 @@ Email: bingye@umich.edu
 
 
 # Standard library imports.
-import csv
 import logging
 import os
 import shutil
-import sys
 from .gui_app_icon import set_frame_icon, setup_application_icons
 
 # Log the load of this module (by the module loader, on first import).
@@ -40,6 +38,7 @@ import webbrowser
 
 # Local application/library specific imports.
 from LabGym import __version__
+from LabGym import categorizer_library
 from .gui_appearance import select_for_appearance
 from .gui_utils import (
 	add_or_select_notebook_page,
@@ -104,29 +103,11 @@ class CategorizerLibraryDialog(wx.Dialog):
 		self._update_button_states()
 
 	def _load_categorizers(self):
-		cats = []
 		try:
-			entries = sorted(os.listdir(self._models_dir))
+			return categorizer_library.discover_categorizers(self._models_dir)
 		except OSError:
-			return cats
-		for name in entries:
-			path = os.path.join(self._models_dir, name)
-			if not os.path.isdir(path):
-				continue
-			params_file = os.path.join(path, 'model_parameters.txt')
-			dim_conv = 'unknown'
-			dim_tconv = 'unknown'
-			try:
-				with open(params_file, 'r') as f:
-					reader = csv.DictReader(f)
-					row = next(reader)
-					dim_conv = row.get('dim_conv', 'unknown').strip()
-					dim_tconv = row.get('dim_tconv', 'unknown').strip()
-			except (OSError, StopIteration, KeyError):
-				pass
-			cats.append({'name': name, 'path': path,
-			             'dim_conv': dim_conv, 'dim_tconv': dim_tconv})
-		return cats
+			logger.exception('cannot list models directory %r', self._models_dir)
+			return []
 
 	def _refresh(self, event=None):
 		self._dvlc.DeleteAllItems()
@@ -138,8 +119,10 @@ class CategorizerLibraryDialog(wx.Dialog):
 			self._lbl_empty.Hide()
 			self._dvlc.Show()
 			for cat in self._cats:
-				self._dvlc.AppendItem(
-					[False, cat['name'], cat['dim_conv'], cat['dim_tconv']])
+				self._dvlc.AppendItem([
+					False, cat.name,
+					'' if cat.dim_conv is None else str(cat.dim_conv),
+					'' if cat.dim_tconv is None else str(cat.dim_tconv)])
 		self._update_button_states()
 		self.Layout()
 
@@ -169,11 +152,11 @@ class CategorizerLibraryDialog(wx.Dialog):
 		errors = []
 		for i in checked:
 			cat = self._cats[i]
-			target = os.path.join(dest, cat['name'])
+			target = os.path.join(dest, cat.name)
 			try:
-				shutil.copytree(cat['path'], target)
+				shutil.copytree(cat.path, target)
 			except Exception as e:
-				errors.append(f"{cat['name']}: {e}")
+				errors.append(f'{cat.name}: {e}')
 		if errors:
 			wx.MessageBox('Some exports failed:\n' + '\n'.join(errors),
 			              'Export Errors', wx.OK | wx.ICON_WARNING, self)
@@ -189,11 +172,11 @@ class CategorizerLibraryDialog(wx.Dialog):
 			return
 		cat = self._cats[checked[0]]
 		with wx.TextEntryDialog(self, 'Enter new name:', 'Rename Categorizer',
-		                        cat['name']) as dlg:
+		                        cat.name) as dlg:
 			if dlg.ShowModal() != wx.ID_OK:
 				return
 			new_name = dlg.GetValue().strip()
-		if not new_name or new_name == cat['name']:
+		if not new_name or new_name == cat.name:
 			return
 		new_path = os.path.join(self._models_dir, new_name)
 		if os.path.exists(new_path):
@@ -201,7 +184,7 @@ class CategorizerLibraryDialog(wx.Dialog):
 			              'Rename Failed', wx.OK | wx.ICON_ERROR, self)
 			return
 		try:
-			os.rename(cat['path'], new_path)
+			os.rename(cat.path, new_path)
 		except OSError as e:
 			wx.MessageBox(f'Rename failed: {e}', 'Error',
 			              wx.OK | wx.ICON_ERROR, self)
@@ -241,31 +224,18 @@ class InitialPanel(wx.Panel):
 		boxsizer.Add(0,50,0)
 
 		module_modules=wx.BoxSizer(wx.HORIZONTAL)
-
-		col_preprocess=wx.BoxSizer(wx.VERTICAL)
 		button_preprocess=wx.Button(panel,label='Preprocessing Module',size=(250,40))
 		button_preprocess.Bind(wx.EVT_BUTTON,self.window_preprocess)
 		wx.Button.SetToolTip(button_preprocess,'Enhance video contrast / crop frames to exclude unnecessary region / trim videos to only keep necessary time windows.')
-		col_preprocess.Add(button_preprocess,0,wx.EXPAND)
-		module_modules.Add(col_preprocess,0,wx.LEFT|wx.RIGHT,10)
-
-		col_train=wx.BoxSizer(wx.VERTICAL)
 		button_train=wx.Button(panel,label='Training Module',size=(250,40))
 		button_train.Bind(wx.EVT_BUTTON,self.window_train)
 		wx.Button.SetToolTip(button_train,'Teach LabGym to recognize the animals / objects of your interest and identify their behaviors that are defined by you.')
-		col_train.Add(button_train,0,wx.EXPAND)
-		module_modules.Add(col_train,0,wx.LEFT|wx.RIGHT,10)
-
-		col_analyze=wx.BoxSizer(wx.VERTICAL)
 		button_analyze=wx.Button(panel,label='Analysis Module',size=(250,40))
 		button_analyze.Bind(wx.EVT_BUTTON,self.window_analyze)
 		wx.Button.SetToolTip(button_analyze,'Use LabGym to track the animals / objects of your interest, identify and quantify their behaviors, and display the statistically significant findings.')
-		col_analyze.Add(button_analyze,0,wx.EXPAND)
-		button_cat_lib=wx.Button(panel,label='Categorizer Library',size=(200,30))
-		button_cat_lib.Bind(wx.EVT_BUTTON,self.open_categorizer_library)
-		col_analyze.Add(button_cat_lib,0,wx.ALIGN_CENTER|wx.TOP,8)
-		module_modules.Add(col_analyze,0,wx.LEFT|wx.RIGHT,10)
-
+		module_modules.Add(button_preprocess,0,wx.LEFT|wx.RIGHT|wx.EXPAND,10)
+		module_modules.Add(button_train,0,wx.LEFT|wx.RIGHT|wx.EXPAND,10)
+		module_modules.Add(button_analyze,0,wx.LEFT|wx.RIGHT|wx.EXPAND,10)
 		boxsizer.Add(module_modules,0,wx.ALIGN_CENTER,50)
 		boxsizer.Add(0,50,0)
 
@@ -294,16 +264,6 @@ class InitialPanel(wx.Panel):
 
 		title = 'Analysis Module'
 		add_or_select_notebook_page(self.notebook, lambda: PanelLv1_AnalysisModule(self.notebook), title)
-
-
-	def open_categorizer_library(self,event):
-		"""Open the Categorizer Library dialog."""
-
-		from LabGym import config
-		models_dir=config.get_config()['models']
-		dlg=CategorizerLibraryDialog(self,models_dir)
-		dlg.ShowModal()
-		dlg.Destroy()
 
 
 
@@ -414,6 +374,12 @@ class PanelLv1_TrainingModule(wx.Panel):
 		button_testcategorizers.Bind(wx.EVT_BUTTON,self.test_categorizers)
 		wx.Button.SetToolTip(button_testcategorizers,'Test trained Categorizers on the sorted ground-truth behavior examples (similar to the behavior examples used for training a Categorizer).')
 		boxsizer.Add(button_testcategorizers,0,wx.ALIGN_CENTER,10)
+		boxsizer.Add(0,5,0)
+
+		button_categorizerlibrary=wx.Button(panel,label='Categorizer Library',size=(300,40))
+		button_categorizerlibrary.Bind(wx.EVT_BUTTON,self.open_categorizer_library)
+		wx.Button.SetToolTip(button_categorizerlibrary,'View the Categorizers in the LabGym models folder, see their behaviors and settings, and export or rename them.')
+		boxsizer.Add(button_categorizerlibrary,0,wx.ALIGN_CENTER,10)
 		boxsizer.Add(0,50,0)
 
 		panel.SetSizer(boxsizer)
@@ -455,6 +421,14 @@ class PanelLv1_TrainingModule(wx.Panel):
 		"""Open the Test Categorizers panel."""
 		title = 'Test Categorizers'
 		add_or_select_notebook_page(self.notebook, lambda: PanelLv2_TestCategorizers(self.notebook), title)
+
+	def open_categorizer_library(self,event):
+		"""Open the Categorizer Library dialog."""
+		from LabGym import config
+		models_dir=config.get_config()['models']
+		dlg=CategorizerLibraryDialog(self,models_dir)
+		dlg.ShowModal()
+		dlg.Destroy()
 
 
 class PanelLv1_AnalysisModule(wx.Panel):
