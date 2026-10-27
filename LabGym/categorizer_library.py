@@ -58,7 +58,7 @@ BEHAVIOR_MODES = {
 
 # Architecture columns that apply to each network type.
 ARCHITECTURE_FIELDS = {
-	NETWORK_PATTERN: ('dim_conv', 'level_conv'),
+	NETWORK_PATTERN: ('dim_conv', 'level_conv', 'channel'),
 	NETWORK_ANIMATION: ('dim_tconv', 'level_tconv', 'channel'),
 	NETWORK_COMBINED: ('dim_conv', 'level_conv', 'dim_tconv', 'level_tconv', 'channel'),
 }
@@ -293,15 +293,15 @@ def _interpret_parameters(rows, problems, notes) -> dict:
 	if network is not None:
 		for field in ARCHITECTURE_FIELDS[network]:
 			if field not in first:
-				problems.append(f'{field} not recorded for a {NETWORK_TYPES[network]} model')
+				problems.append(f'{field} not recorded (required for {NETWORK_TYPES[network]} models)')
 			out[field] = as_int(field, required=True)
-	# Static-image Pattern Recognizers also record their channel count.
-	if network == NETWORK_PATTERN and out['behavior_mode'] == 3:
-		out['channel'] = as_int('channel')
 
 	# Settings that only apply to Interactive advanced models.
 	if out['behavior_mode'] == 2:
-		out['social_distance'] = as_int('social_distance')
+		if 'social_distance' not in first:
+			problems.append('social_distance not recorded for an Interactive advanced model')
+		out['social_distance'] = as_int('social_distance', required=True)
+		# LabGym has a default when color_code is missing, so it is optional.
 		if network in (NETWORK_ANIMATION, NETWORK_COMBINED):
 			out['color_code'] = as_int('color_code')
 
