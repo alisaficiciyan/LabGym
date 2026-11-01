@@ -401,3 +401,99 @@ def test_incomplete_folder_does_not_hide_others(tmp_path):
 	broken, good = cl.discover_categorizers(tmp_path)
 	assert broken.status == cl.STATUS_INCOMPLETE
 	assert good.status == cl.STATUS_AVAILABLE
+
+
+# Display text for the main list and the details.
+
+def _details(info):
+	return dict(cl.detail_rows(info))
+
+
+def test_list_row_has_no_architecture_columns(tmp_path):
+	_make_model(tmp_path, 'combo', ('p', 'q', 'r', 's'), COMBINED_PARAMS)
+	assert cl.list_row(_only(tmp_path)) == (
+		'combo', 'Combined', '4 classes: p, q, r, ...', 'Interactive advanced', 'Available')
+
+
+def test_list_row_for_unrelated_folder(tmp_path):
+	(tmp_path / 'notes').mkdir()
+	assert cl.list_row(_only(tmp_path)) == (
+		'notes', 'Unknown', 'No classes recorded', 'Unknown', 'Incomplete')
+
+
+def test_pattern_details_show_only_pattern_architecture(tmp_path):
+	_make_model(tmp_path, 'pat', ('groom', 'rear'), PATTERN_PARAMS)
+	d = _details(_only(tmp_path))
+	assert d['Pattern Recognizer dimension'] == '32'
+	assert d['Pattern Recognizer level'] == '3'
+	assert 'Animation Analyzer dimension' not in d
+	assert 'Animation Analyzer level' not in d
+	assert d['Behavior classes (2)'] == 'groom\nrear'
+	assert d['Time step'] == '15 frames'
+	assert d['Channel'] == '1'
+	assert d['Body parts'] == 'Not included'
+	assert d['Background'] == 'Included'
+	assert 'Social distance' not in d
+
+
+def test_animation_details_show_only_animation_architecture(tmp_path):
+	_make_model(tmp_path, 'anim', params=ANIMATION_PARAMS)
+	d = _details(_only(tmp_path))
+	assert d['Animation Analyzer dimension'] == '16'
+	assert d['Animation Analyzer level'] == '2'
+	assert 'Pattern Recognizer dimension' not in d
+	assert d['Background'] == 'Excluded (white background)'
+
+
+def test_combined_details(tmp_path):
+	folder = _make_model(tmp_path, 'combo', params=COMBINED_PARAMS, metrics=True)
+	d = _details(_only(tmp_path))
+	assert d['Pattern Recognizer dimension'] == '64'
+	assert d['Pattern Recognizer level'] == '4'
+	assert d['Animation Analyzer dimension'] == '64'
+	assert d['Animation Analyzer level'] == '4'
+	assert d['Body parts'] == 'Included (STD 50)'
+	assert d['Background'] == 'Excluded (black background)'
+	assert d['Social distance'] == '3'
+	assert d['Supporting characters'] == 'Grayscale'
+	assert d['Location'] == os.path.abspath(folder)
+	assert d['Training metrics'] == cl.TRAINING_METRICS_FILENAME
+	assert d['Training history'] == 'Not found'
+
+
+def test_details_never_claim_compatibility_or_version(tmp_path):
+	_make_model(tmp_path, 'm', params=PATTERN_PARAMS)
+	d = _details(_only(tmp_path))
+	assert d['Status'] == 'Available (files present; compatibility not checked)'
+	assert d['LabGym version'] == 'Not recorded'
+	assert 'compatib' in cl.AVAILABLE_MEANING
+
+
+def test_incomplete_details_list_problems(tmp_path):
+	_make_model(tmp_path, 'm', params=PATTERN_PARAMS, weights=False)
+	d = _details(_only(tmp_path))
+	assert d['Status'] == 'Incomplete'
+	assert 'saved_model.pb not found' in d['Problems']
+	assert 'variables/ folder not found' in d['Problems']
+
+
+def test_unrecorded_defaults_are_labelled(tmp_path):
+	params = _without(_without(COMBINED_PARAMS, 'color_code'), 'black_background')
+	_make_model(tmp_path, 'adv', params=params)
+	_make_model(tmp_path, 'old', params=_without(PATTERN_PARAMS, 'behavior_kind'))
+	adv, old = cl.discover_categorizers(tmp_path)
+	assert _details(adv)['Supporting characters'] == 'Grayscale (not recorded; LabGym default)'
+	assert _details(adv)['Background'] == 'Excluded'
+	assert _details(old)['Behavior mode'] == 'Non-interactive (not recorded; LabGym default)'
+
+
+def test_social_distance_zero_means_no_limit(tmp_path):
+	_make_model(tmp_path, 'm', params={**COMBINED_PARAMS, 'social_distance': '0'})
+	assert _details(_only(tmp_path))['Social distance'] == '0 (no limit)'
+
+
+def test_format_details_indents_multiline_values(tmp_path):
+	_make_model(tmp_path, 'm', ('a', 'b'), PATTERN_PARAMS)
+	text = cl.format_details(_only(tmp_path))
+	assert 'Behavior classes (2):\n    a\n    b\n' in text
+	assert 'Name: m\n' in text

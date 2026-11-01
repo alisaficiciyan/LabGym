@@ -62,7 +62,7 @@ class CategorizerLibraryDialog(wx.Dialog):
 	def __init__(self, parent, models_dir):
 		super().__init__(parent, title='Categorizer Library',
 		                 style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
-		                 size=(660, 460))
+		                 size=(1100, 620))
 		self._models_dir = models_dir
 		self._cats = []
 		self._build_ui()
@@ -84,20 +84,40 @@ class CategorizerLibraryDialog(wx.Dialog):
 		toolbar.Add(self._btn_refresh, 0)
 		vs.Add(toolbar, 0, wx.ALL, 10)
 
+		body = wx.BoxSizer(wx.HORIZONTAL)
+
+		list_col = wx.BoxSizer(wx.VERTICAL)
 		self._dvlc = wx.dataview.DataViewListCtrl(
 			self, style=wx.dataview.DV_ROW_LINES | wx.dataview.DV_HORIZ_RULES)
 		self._dvlc.AppendToggleColumn('', width=36)
-		self._dvlc.AppendTextColumn('Name', width=220)
-		self._dvlc.AppendTextColumn('Pattern Recognizer Dim', width=185)
-		self._dvlc.AppendTextColumn('Animation Analyzer Dim', width=185)
+		self._dvlc.AppendTextColumn('Name', width=170)
+		self._dvlc.AppendTextColumn('Network type', width=95)
+		self._dvlc.AppendTextColumn('Behaviors', width=230)
+		self._dvlc.AppendTextColumn('Behavior mode', width=130)
+		self._dvlc.AppendTextColumn('Status', width=85)
 		self._dvlc.Bind(wx.dataview.EVT_DATAVIEW_ITEM_VALUE_CHANGED,
 		                lambda _e: self._update_button_states())
-		vs.Add(self._dvlc, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+		self._dvlc.Bind(wx.dataview.EVT_DATAVIEW_SELECTION_CHANGED,
+		                lambda _e: self._show_details())
+		list_col.Add(self._dvlc, 1, wx.EXPAND)
 
 		self._lbl_empty = wx.StaticText(self, label='No categorizers found.',
 		                                style=wx.ALIGN_CENTER)
 		self._lbl_empty.Hide()
-		vs.Add(self._lbl_empty, 0, wx.ALIGN_CENTER | wx.BOTTOM, 20)
+		list_col.Add(self._lbl_empty, 0, wx.ALIGN_CENTER | wx.TOP, 20)
+		body.Add(list_col, 3, wx.EXPAND | wx.RIGHT, 10)
+
+		details_box = wx.StaticBoxSizer(wx.VERTICAL, self, 'Details')
+		self._txt_details = wx.TextCtrl(
+			details_box.GetStaticBox(),
+			style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP)
+		details_box.Add(self._txt_details, 1, wx.EXPAND | wx.ALL, 4)
+		body.Add(details_box, 2, wx.EXPAND)
+
+		vs.Add(body, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
+
+		lbl_available = wx.StaticText(self, label=categorizer_library.AVAILABLE_MEANING)
+		vs.Add(lbl_available, 0, wx.ALL, 10)
 
 		self.SetSizer(vs)
 		self._update_button_states()
@@ -110,6 +130,7 @@ class CategorizerLibraryDialog(wx.Dialog):
 			return []
 
 	def _refresh(self, event=None):
+		selected = self._selected_categorizer()
 		self._dvlc.DeleteAllItems()
 		self._cats = self._load_categorizers()
 		if not self._cats:
@@ -119,12 +140,28 @@ class CategorizerLibraryDialog(wx.Dialog):
 			self._lbl_empty.Hide()
 			self._dvlc.Show()
 			for cat in self._cats:
-				self._dvlc.AppendItem([
-					False, cat.name,
-					'' if cat.dim_conv is None else str(cat.dim_conv),
-					'' if cat.dim_tconv is None else str(cat.dim_tconv)])
+				self._dvlc.AppendItem([False, *categorizer_library.list_row(cat)])
+			# Keep the same model selected across a refresh.
+			names = [cat.name for cat in self._cats]
+			if selected is not None and selected.name in names:
+				self._dvlc.SelectRow(names.index(selected.name))
+		self._show_details()
 		self._update_button_states()
 		self.Layout()
+
+	def _selected_categorizer(self):
+		row = self._dvlc.GetSelectedRow()
+		if row == wx.NOT_FOUND or row >= len(self._cats):
+			return None
+		return self._cats[row]
+
+	def _show_details(self):
+		cat = self._selected_categorizer()
+		if cat is None:
+			self._txt_details.SetValue('Select a Categorizer to see its details.')
+		else:
+			self._txt_details.SetValue(categorizer_library.format_details(cat))
+			self._txt_details.SetInsertionPoint(0)
 
 	def _on_refresh(self, event):
 		self._refresh()

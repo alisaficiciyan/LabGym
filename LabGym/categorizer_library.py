@@ -306,3 +306,114 @@ def _interpret_parameters(rows, problems, notes) -> dict:
 			out['color_code'] = as_int('color_code')
 
 	return out
+
+
+# Display text.  Kept here, not in the dialog, so it can be tested
+# without wx and reused by any entry point.
+
+UNKNOWN = 'Unknown'
+
+AVAILABLE_MEANING = (
+	'Available means the model files and required settings are present. '
+	'It does not confirm compatibility with this version of LabGym.')
+
+
+def list_row(info: CategorizerInfo) -> tuple[str, str, str, str, str]:
+	"""Main-list columns: name, network type, behaviors, behavior mode, status."""
+	return (
+		info.name,
+		info.network_type or UNKNOWN,
+		info.behavior_summary(),
+		info.behavior_mode_name or UNKNOWN,
+		info.status,
+	)
+
+
+def detail_rows(info: CategorizerInfo) -> list[tuple[str, str]]:
+	"""(label, value) pairs for the selected-model details.
+
+	Only settings that apply to the model's network type and behavior
+	mode are included.  Values come from the model folder only.
+	"""
+	rows = [('Name', info.name)]
+
+	if info.is_available:
+		rows.append(('Status', f'{STATUS_AVAILABLE} (files present; compatibility not checked)'))
+	else:
+		rows.append(('Status', STATUS_INCOMPLETE))
+		rows.append(('Problems', '\n'.join(info.problems)))
+
+	rows.append(('Network type', info.network_type or UNKNOWN))
+	mode = info.behavior_mode_name or UNKNOWN
+	if info.behavior_mode_name and not info.behavior_mode_recorded:
+		mode += ' (not recorded; LabGym default)'
+	rows.append(('Behavior mode', mode))
+
+	if info.classnames:
+		rows.append((f'Behavior classes ({len(info.classnames)})', '\n'.join(info.classnames)))
+	else:
+		rows.append(('Behavior classes', 'None recorded'))
+
+	def add(label, value, fmt='{}'):
+		if value is not None:
+			rows.append((label, fmt.format(value)))
+
+	if info.network in (NETWORK_PATTERN, NETWORK_COMBINED):
+		add('Pattern Recognizer dimension', info.dim_conv)
+		add('Pattern Recognizer level', info.level_conv)
+	if info.network in (NETWORK_ANIMATION, NETWORK_COMBINED):
+		add('Animation Analyzer dimension', info.dim_tconv)
+		add('Animation Analyzer level', info.level_tconv)
+	add('Time step', info.time_step, '{} frames')
+	add('Channel', info.channel)
+
+	if info.inner_code is not None:
+		if info.inner_code == 0:
+			body = 'Included' if info.std is None else f'Included (STD {info.std})'
+		else:
+			body = 'Not included'
+		rows.append(('Body parts', body))
+
+	if info.background_free is not None:
+		if info.background_free == 0:
+			background = 'Excluded'
+			if info.black_background == 1:
+				background += ' (white background)'
+			elif info.black_background == 0:
+				background += ' (black background)'
+		else:
+			background = 'Included'
+		rows.append(('Background', background))
+
+	if info.behavior_mode == 2:
+		if info.social_distance == 0:
+			rows.append(('Social distance', '0 (no limit)'))
+		else:
+			add('Social distance', info.social_distance)
+		if info.network in (NETWORK_ANIMATION, NETWORK_COMBINED):
+			if info.color_code is None:
+				costar = 'Grayscale (not recorded; LabGym default)'
+			else:
+				costar = 'RGB' if info.color_code == 0 else 'Grayscale'
+			rows.append(('Supporting characters', costar))
+
+	rows.append(('Location', info.path))
+	rows.append(('Training metrics', TRAINING_METRICS_FILENAME if info.has_training_metrics else 'Not found'))
+	rows.append(('Training history', TRAINING_HISTORY_FILENAME if info.has_training_history else 'Not found'))
+	rows.append(('LabGym version', 'Not recorded'))
+
+	if info.notes:
+		rows.append(('Notes', '\n'.join(info.notes)))
+	return rows
+
+
+def format_details(info: CategorizerInfo) -> str:
+	"""detail_rows as plain text, one 'Label: value' block per row."""
+	blocks = []
+	for label, value in detail_rows(info):
+		if '\n' in value:
+			lines = '\n'.join('    ' + v for v in value.split('\n'))
+			blocks.append(f'{label}:\n{lines}')
+		else:
+			blocks.append(f'{label}: {value}')
+	return '\n'.join(blocks)
