@@ -497,3 +497,218 @@ def test_format_details_indents_multiline_values(tmp_path):
 	text = cl.format_details(_only(tmp_path))
 	assert 'Behavior classes (2):\n    a\n    b\n' in text
 	assert 'Name: m\n' in text
+
+
+# File actions.
+
+import shutil
+import subprocess
+
+import pytest
+
+
+@pytest.mark.parametrize('name, fragment', [
+	('', 'Enter a name'),
+	('   ', 'Enter a name'),
+	(' lead', 'start or end with a space'),
+	('trail ', 'start or end with a space'),
+	('m', 'same as the current name'),
+	('a/b', 'cannot contain / or \\'),
+	('a\\b', 'cannot contain / or \\'),
+	('a:b', 'cannot contain any of these characters'),
+	('a*b', 'cannot contain any of these characters'),
+	('a?b', 'cannot contain any of these characters'),
+	('tab\there', 'cannot contain any of these characters'),
+	('.', 'cannot start with a period'),
+	('..', 'cannot start with a period'),
+	('.hidden', 'cannot start with a period'),
+	('dot.', 'cannot end with a period'),
+	('__pycache__', 'reserved and cannot be used'),
+	('CON', 'reserved name on Windows'),
+	('nul', 'reserved name on Windows'),
+	('com1.txt', 'reserved name on Windows'),
+	('LPT9', 'reserved name on Windows'),
+	('x' * 256, 'too long'),
+])
+def test_rename_rejects_invalid_names(tmp_path, name, fragment):
+	_make_model(tmp_path, 'm', params=PATTERN_PARAMS)
+	assert fragment in cl.validate_new_name(tmp_path, 'm', name)
+	with pytest.raises(cl.LibraryActionError, match='.'):
+		cl.rename_categorizer(tmp_path, 'm', name)
+	assert (tmp_path / 'm').is_dir()
+
+
+def test_rename_accepts_ordinary_names(tmp_path):
+	_make_model(tmp_path, 'm', params=PATTERN_PARAMS)
+	for name in ('mouse grooming v2', 'café_model', 'CONSOLE', 'a.b'):
+		assert cl.validate_new_name(tmp_path, 'm', name) is None
+
+
+def test_rename_success(tmp_path):
+	_make_model(tmp_path, 'old', params=PATTERN_PARAMS)
+	new_path = cl.rename_categorizer(tmp_path, 'old', 'new')
+	assert new_path == os.path.join(os.path.abspath(tmp_path), 'new')
+	assert [i.name for i in cl.discover_categorizers(tmp_path)] == ['new']
+	assert _only(tmp_path).is_available
+
+
+def test_rename_collision_leaves_both_folders(tmp_path):
+	_make_model(tmp_path, 'a', params=PATTERN_PARAMS)
+	_make_model(tmp_path, 'b', params=ANIMATION_PARAMS)
+	with pytest.raises(cl.LibraryActionError, match='"b" already exists'):
+		cl.rename_categorizer(tmp_path, 'a', 'b')
+	a, b = cl.discover_categorizers(tmp_path)
+	assert (a.network_type, b.network_type) == ('Pattern', 'Animation')
+
+
+def test_rename_collision_is_case_insensitive(tmp_path):
+	_make_model(tmp_path, 'a', params=PATTERN_PARAMS)
+	_make_model(tmp_path, 'Mouse', params=PATTERN_PARAMS)
+	assert 'already exists' in cl.validate_new_name(tmp_path, 'a', 'mouse')
+
+
+def test_rename_collision_with_file_or_junk_folder(tmp_path):
+	_make_model(tmp_path, 'a', params=PATTERN_PARAMS)
+	(tmp_path / 'notes.txt').write_text('', encoding='utf-8')
+	assert 'already exists' in cl.validate_new_name(tmp_path, 'a', 'notes.txt')
+
+
+def test_rename_case_only_change_allowed(tmp_path):
+	_make_model(tmp_path, 'mouse', params=PATTERN_PARAMS)
+	assert cl.validate_new_name(tmp_path, 'mouse', 'Mouse') is None
+	cl.rename_categorizer(tmp_path, 'mouse', 'Mouse')
+	assert [i.name for i in cl.discover_categorizers(tmp_path)] == ['Mouse']
+
+
+def test_rename_missing_source(tmp_path):
+	with pytest.raises(cl.LibraryActionError, match='no longer exists'):
+		cl.rename_categorizer(tmp_path, 'gone', 'new')
+
+
+def _tree(folder):
+	return sorted(str(p.relative_to(folder)) for p in Path(folder).rglob('*'))
+
+
+def test_export_copies_model(tmp_path):
+	src = _make_model(tmp_path / 'models', 'm', params=COMBINED_PARAMS, metrics=True)
+	dest = tmp_path / 'dest'
+	dest.mkdir()
+	target = cl.export_categorizer(src, dest)
+	assert target == str(dest / 'm')
+	assert _tree(target) == _tree(src)
+	assert cl.read_categorizer(target).is_available
+	# no staging folder left behind
+	assert os.listdir(dest) == ['m']
+
+
+def test_export_never_overwrites_or_merges(tmp_path):
+	src = _make_model(tmp_path / 'models', 'm', params=COMBINED_PARAMS)
+	dest = tmp_path / 'dest'
+	existing = dest / 'm'
+	existing.mkdir(parents=True)
+	(existing / 'keep.txt').write_text('mine', encoding='utf-8')
+	with pytest.raises(cl.LibraryActionError, match='already contains a folder named "m"'):
+		cl.export_categorizer(src, dest)
+	assert _tree(existing) == ['keep.txt']
+	assert (existing / 'keep.txt').read_text(encoding='utf-8') == 'mine'
+	assert os.listdir(dest) == ['m']
+
+
+def test_export_refuses_empty_existing_folder_and_file(tmp_path):
+	src = _make_model(tmp_path / 'models', 'm', params=PATTERN_PARAMS)
+	for i, make in enumerate((lambda p: p.mkdir(), lambda p: p.write_text(''))):
+		dest = tmp_path / f'dest{i}'
+		dest.mkdir()
+		make(dest / 'm')
+		with pytest.raises(cl.LibraryActionError, match='already contains'):
+			cl.export_categorizer(src, dest)
+
+
+def test_export_collision_is_case_insensitive(tmp_path):
+	src = _make_model(tmp_path / 'models', 'Mouse', params=PATTERN_PARAMS)
+	dest = tmp_path / 'dest'
+	(dest / 'mouse').mkdir(parents=True)
+	with pytest.raises(cl.LibraryActionError, match='already contains a folder named "mouse"'):
+		cl.export_categorizer(src, dest)
+
+
+def test_failed_export_leaves_nothing(tmp_path, monkeypatch):
+	src = _make_model(tmp_path / 'models', 'm', params=COMBINED_PARAMS)
+	dest = tmp_path / 'dest'
+	dest.mkdir()
+	real_copytree = shutil.copytree
+
+	def copy_then_fail(s, d, *args, **kwargs):
+		real_copytree(s, d, *args, **kwargs)  # a full copy exists in staging...
+		raise OSError(28, 'No space left on device')  # ...then the copy fails
+
+	monkeypatch.setattr(cl.shutil, 'copytree', copy_then_fail)
+	with pytest.raises(cl.LibraryActionError, match='could not be exported; nothing was kept'):
+		cl.export_categorizer(src, dest)
+	assert os.listdir(dest) == []
+
+
+def test_export_collision_appearing_during_copy(tmp_path, monkeypatch):
+	src = _make_model(tmp_path / 'models', 'm', params=PATTERN_PARAMS)
+	dest = tmp_path / 'dest'
+	dest.mkdir()
+	real_copytree = shutil.copytree
+
+	def copy_and_race(s, d, *args, **kwargs):
+		real_copytree(s, d, *args, **kwargs)
+		if not (dest / 'm').exists():  # copytree recurses through this patch
+			(dest / 'm').mkdir()
+		(dest / 'm' / 'other.txt').write_text('other', encoding='utf-8')
+
+	monkeypatch.setattr(cl.shutil, 'copytree', copy_and_race)
+	with pytest.raises(cl.LibraryActionError, match='already contains'):
+		cl.export_categorizer(src, dest)
+	assert _tree(dest) == ['m', os.path.join('m', 'other.txt')]
+
+
+def test_export_incomplete_model_copies_as_is(tmp_path):
+	# The dialog warns first; the copy itself does not repair anything.
+	src = _make_model(tmp_path / 'models', 'm', params=PATTERN_PARAMS, weights=False)
+	dest = tmp_path / 'dest'
+	dest.mkdir()
+	target = cl.export_categorizer(src, dest)
+	assert cl.read_categorizer(target).status == cl.STATUS_INCOMPLETE
+
+
+def test_export_into_own_folder_refused(tmp_path):
+	src = _make_model(tmp_path, 'm', params=PATTERN_PARAMS)
+	for dest in (src, src / 'variables'):
+		with pytest.raises(cl.LibraryActionError, match='into its own folder'):
+			cl.export_categorizer(src, dest)
+
+
+def test_export_missing_source_or_destination(tmp_path):
+	src = _make_model(tmp_path, 'm', params=PATTERN_PARAMS)
+	with pytest.raises(cl.LibraryActionError, match='no longer exists'):
+		cl.export_categorizer(tmp_path / 'gone', tmp_path)
+	with pytest.raises(cl.LibraryActionError, match='destination folder does not exist'):
+		cl.export_categorizer(src, tmp_path / 'nowhere')
+
+
+def test_reveal_command_per_platform():
+	assert cl.reveal_command('/m/a', 'darwin') == ['open', '-R', '/m/a']
+	assert cl.reveal_command('/m/a', 'win32')[:2] == ['explorer', '/select,']
+	assert cl.reveal_command('/m/a', 'linux') == ['xdg-open', '/m']
+
+
+def test_reveal_location(tmp_path, monkeypatch):
+	# Never launch a real file manager from the tests.
+	calls = []
+	monkeypatch.setattr(cl.subprocess, 'Popen', lambda cmd: calls.append(cmd))
+	cl.reveal_location(str(tmp_path))
+	assert calls == [cl.reveal_command(str(tmp_path))]
+	with pytest.raises(cl.LibraryActionError, match='no longer exists'):
+		cl.reveal_location(str(tmp_path / 'gone'))
+
+
+def test_reveal_location_without_file_manager(tmp_path, monkeypatch):
+	def missing(cmd):
+		raise FileNotFoundError(2, 'No such file', cmd[0])
+	monkeypatch.setattr(cl.subprocess, 'Popen', missing)
+	with pytest.raises(cl.LibraryActionError, match='The location is:'):
+		cl.reveal_location(str(tmp_path))

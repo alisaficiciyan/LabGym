@@ -15,6 +15,10 @@ import csv
 import dataclasses
 import logging
 import os
+import shutil
+import subprocess
+import sys
+import tempfile
 
 # Log the load of this module (by the module loader, on first import).
 logger = logging.getLogger(__name__)
@@ -417,3 +421,160 @@ def format_details(info: CategorizerInfo) -> str:
 		else:
 			blocks.append(f'{label}: {value}')
 	return '\n'.join(blocks)
+
+
+# File actions: reveal, export, rename.
+
+class LibraryActionError(Exception):
+	"""A file action failed or was refused; str(e) is shown to the user."""
+
+
+# Characters Windows does not allow in file names.  They are rejected
+# on every platform so a renamed model can be shared across platforms.
+INVALID_NAME_CHARS = frozenset('<>:"/\\|?*')
+
+WINDOWS_RESERVED_NAMES = frozenset(
+	['CON', 'PRN', 'AUX', 'NUL']
+	+ [f'COM{i}' for i in range(1, 10)]
+	+ [f'LPT{i}' for i in range(1, 10)])
+
+MAX_NAME_BYTES = 255
+
+
+def _find_casefold(folder, name):
+	"""Name of an entry in folder matching name case-insensitively, or None.
+
+	Case-insensitive because the default macOS and Windows file systems
+	treat 'Mouse' and 'mouse' as the same folder.
+	"""
+	key = name.casefold()
+	for entry in os.listdir(folder):
+		if entry.casefold() == key:
+			return entry
+	return None
+
+
+def validate_new_name(models_dir, current_name, new_name) -> str | None:
+	"""Return why new_name cannot be used to rename current_name, or None."""
+	if not new_name or not new_name.strip():
+		return 'Enter a name.'
+	if new_name != new_name.strip():
+		return 'The name cannot start or end with a space.'
+	if new_name == current_name:
+		return 'The new name is the same as the current name.'
+	if '/' in new_name or '\\' in new_name:
+		return 'The name cannot contain / or \\.'
+	if any(c in INVALID_NAME_CHARS or ord(c) < 32 for c in new_name):
+		return 'The name cannot contain any of these characters: < > : " | ? *'
+	if new_name.startswith('.'):
+		return 'The name cannot start with a period; such folders are hidden from the library.'
+	if new_name.endswith('.'):
+		return 'The name cannot end with a period.'
+	if is_excluded_dirname(new_name):
+		return f'"{new_name}" is reserved and cannot be used as a Categorizer name.'
+	if new_name.split('.')[0].strip().upper() in WINDOWS_RESERVED_NAMES:
+		return f'"{new_name}" is a reserved name on Windows.'
+	if len(new_name.encode('utf-8')) > MAX_NAME_BYTES:
+		return 'The name is too long.'
+	try:
+		existing = [e for e in os.listdir(models_dir) if e != current_name]
+	except OSError as e:
+		return f'The models folder could not be read ({e}).'
+	key = new_name.casefold()
+	clash = next((e for e in existing if e.casefold() == key), None)
+	if clash is not None:
+		return f'A folder named "{clash}" already exists in the models folder.'
+	return None
+
+
+def rename_categorizer(models_dir, current_name, new_name) -> str:
+	"""Rename a model folder inside models_dir; return the new path.
+
+	Raises LibraryActionError if the name is invalid, collides with an
+	existing folder, or the rename fails.  Never replaces another folder.
+	"""
+	models_dir = os.path.abspath(models_dir)
+	src = os.path.join(models_dir, current_name)
+	if not os.path.isdir(src):
+		raise LibraryActionError(f'"{current_name}" no longer exists. Refresh the library.')
+	problem = validate_new_name(models_dir, current_name, new_name)
+	if problem:
+		raise LibraryActionError(problem)
+	dst = os.path.join(models_dir, new_name)
+	try:
+		os.rename(src, dst)
+	except OSError as e:
+		raise LibraryActionError(f'"{current_name}" could not be renamed ({e}).') from None
+	return dst
+
+
+def export_categorizer(src_path, dest_dir) -> str:
+	"""Copy a model folder into dest_dir; return the new folder's path.
+
+	The copy is made in a hidden temporary folder inside dest_dir and
+	moved into place only after it finishes, so a failed export never
+	leaves a folder that looks like a complete model.  An existing
+	folder of the same name is never overwritten or merged into.
+	Raises LibraryActionError on any failure.
+	"""
+	src_path = os.path.abspath(src_path)
+	dest_dir = os.path.abspath(dest_dir)
+	name = os.path.basename(src_path)
+	if not os.path.isdir(src_path):
+		raise LibraryActionError(f'"{name}" no longer exists. Refresh the library.')
+	if not os.path.isdir(dest_dir):
+		raise LibraryActionError(f'The destination folder does not exist: {dest_dir}')
+	if os.path.commonpath([src_path, dest_dir]) == src_path:
+		raise LibraryActionError(f'"{name}" cannot be exported into its own folder.')
+
+	def check_collision():
+		try:
+			clash = _find_casefold(dest_dir, name)
+		except OSError as e:
+			raise LibraryActionError(f'The destination folder could not be read ({e}).') from None
+		if clash is not None:
+			raise LibraryActionError(
+				f'The destination already contains a folder named "{clash}". '
+				'Nothing was copied. Choose another destination, or move or rename that folder first.')
+
+	check_collision()
+	target = os.path.join(dest_dir, name)
+	try:
+		staging = tempfile.mkdtemp(prefix=f'.{name}.export-incomplete-', dir=dest_dir)
+	except OSError as e:
+		raise LibraryActionError(f'Could not write to the destination folder ({e}).') from None
+	try:
+		staged = os.path.join(staging, name)
+		shutil.copytree(src_path, staged)
+		# Check again in case the folder appeared while copying.  os.rename
+		# then refuses a non-empty existing folder on every platform.
+		check_collision()
+		os.rename(staged, target)
+	except LibraryActionError:
+		raise
+	except (OSError, shutil.Error) as e:
+		raise LibraryActionError(f'"{name}" could not be exported; nothing was kept ({e}).') from None
+	finally:
+		shutil.rmtree(staging, ignore_errors=True)
+	return target
+
+
+def reveal_command(path, platform=None) -> list[str]:
+	"""Command that shows path in the system file manager."""
+	platform = sys.platform if platform is None else platform
+	if platform == 'darwin':
+		return ['open', '-R', path]
+	if platform.startswith('win'):
+		return ['explorer', '/select,', os.path.normpath(path)]
+	# Most Linux file managers cannot select an item, so open its parent.
+	return ['xdg-open', os.path.dirname(path)]
+
+
+def reveal_location(path) -> None:
+	"""Show path in the system file manager without waiting for it."""
+	if not os.path.exists(path):
+		raise LibraryActionError(f'{path} no longer exists. Refresh the library.')
+	try:
+		subprocess.Popen(reveal_command(path))
+	except OSError as e:
+		raise LibraryActionError(f'The file manager could not be opened ({e}). The location is:\n{path}') from None

@@ -19,8 +19,6 @@ Email: bingye@umich.edu
 
 # Standard library imports.
 import logging
-import os
-import shutil
 from .gui_app_icon import set_frame_icon, setup_application_icons
 
 # Log the load of this module (by the module loader, on first import).
@@ -73,15 +71,21 @@ class CategorizerLibraryDialog(wx.Dialog):
 		vs = wx.BoxSizer(wx.VERTICAL)
 
 		toolbar = wx.BoxSizer(wx.HORIZONTAL)
-		self._btn_export = wx.Button(self, label='Export')
-		self._btn_rename = wx.Button(self, label='Rename')
 		self._btn_refresh = wx.Button(self, label='Refresh')
+		self._btn_reveal = wx.Button(self, label='Reveal Location')
+		self._btn_export = wx.Button(self, label='Export...')
+		self._btn_rename = wx.Button(self, label='Rename...')
+		self._btn_refresh.SetToolTip('Scan the models folder again.')
+		self._btn_reveal.SetToolTip('Show the selected Categorizer folder in your file manager.')
+		self._btn_export.SetToolTip('Copy the checked Categorizers (or the selected one, if none are checked) to another folder.')
+		self._btn_rename.SetToolTip('Rename the selected Categorizer folder.')
+		self._btn_refresh.Bind(wx.EVT_BUTTON, self._on_refresh)
+		self._btn_reveal.Bind(wx.EVT_BUTTON, self._on_reveal)
 		self._btn_export.Bind(wx.EVT_BUTTON, self._on_export)
 		self._btn_rename.Bind(wx.EVT_BUTTON, self._on_rename)
-		self._btn_refresh.Bind(wx.EVT_BUTTON, self._on_refresh)
-		toolbar.Add(self._btn_export, 0, wx.RIGHT, 6)
-		toolbar.Add(self._btn_rename, 0, wx.RIGHT, 6)
-		toolbar.Add(self._btn_refresh, 0)
+		for btn in (self._btn_refresh, self._btn_reveal, self._btn_export):
+			toolbar.Add(btn, 0, wx.RIGHT, 6)
+		toolbar.Add(self._btn_rename, 0)
 		vs.Add(toolbar, 0, wx.ALL, 10)
 
 		body = wx.BoxSizer(wx.HORIZONTAL)
@@ -98,7 +102,7 @@ class CategorizerLibraryDialog(wx.Dialog):
 		self._dvlc.Bind(wx.dataview.EVT_DATAVIEW_ITEM_VALUE_CHANGED,
 		                lambda _e: self._update_button_states())
 		self._dvlc.Bind(wx.dataview.EVT_DATAVIEW_SELECTION_CHANGED,
-		                lambda _e: self._show_details())
+		                lambda _e: (self._show_details(), self._update_button_states()))
 		list_col.Add(self._dvlc, 1, wx.EXPAND)
 
 		self._lbl_empty = wx.StaticText(self, label='No categorizers found.',
@@ -129,8 +133,11 @@ class CategorizerLibraryDialog(wx.Dialog):
 			logger.exception('cannot list models directory %r', self._models_dir)
 			return []
 
-	def _refresh(self, event=None):
-		selected = self._selected_categorizer()
+	def _refresh(self, event=None, select_name=None):
+		"""Rescan the models folder, keeping (or moving to) a selection."""
+		if select_name is None:
+			selected = self._selected_categorizer()
+			select_name = selected.name if selected is not None else None
 		self._dvlc.DeleteAllItems()
 		self._cats = self._load_categorizers()
 		if not self._cats:
@@ -141,10 +148,9 @@ class CategorizerLibraryDialog(wx.Dialog):
 			self._dvlc.Show()
 			for cat in self._cats:
 				self._dvlc.AppendItem([False, *categorizer_library.list_row(cat)])
-			# Keep the same model selected across a refresh.
 			names = [cat.name for cat in self._cats]
-			if selected is not None and selected.name in names:
-				self._dvlc.SelectRow(names.index(selected.name))
+			if select_name in names:
+				self._dvlc.SelectRow(names.index(select_name))
 		self._show_details()
 		self._update_button_states()
 		self.Layout()
@@ -173,60 +179,104 @@ class CategorizerLibraryDialog(wx.Dialog):
 				checked.append(i)
 		return checked
 
+	def _export_targets(self):
+		"""Checked models, or the selected model if none are checked."""
+		checked = [self._cats[i] for i in self._get_checked_indices()]
+		if checked:
+			return checked
+		selected = self._selected_categorizer()
+		return [selected] if selected is not None else []
+
 	def _update_button_states(self):
-		n = len(self._get_checked_indices())
-		self._btn_export.Enable(n > 0)
-		self._btn_rename.Enable(n == 1)
+		has_selection = self._selected_categorizer() is not None
+		self._btn_reveal.Enable(has_selection)
+		self._btn_rename.Enable(has_selection)
+		self._btn_export.Enable(bool(self._export_targets()))
+
+	def _error(self, message, caption):
+		wx.MessageBox(message, caption, wx.OK | wx.ICON_ERROR, self)
+
+	def _on_reveal(self, event):
+		cat = self._selected_categorizer()
+		if cat is None:
+			return
+		try:
+			categorizer_library.reveal_location(cat.path)
+		except categorizer_library.LibraryActionError as e:
+			self._error(str(e), 'Reveal Location')
 
 	def _on_export(self, event):
-		checked = self._get_checked_indices()
-		if not checked:
+		cats = self._export_targets()
+		if not cats:
 			return
+
+		incomplete = [cat for cat in cats if not cat.is_available]
+		if incomplete:
+			lines = [f'- {cat.name}: ' + '; '.join(cat.problems) for cat in incomplete]
+			message = ('These Categorizers are Incomplete and may not work when loaded:\n\n'
+			           + '\n'.join(lines)
+			           + '\n\nExport them anyway?')
+			with wx.MessageDialog(self, message, 'Export Incomplete Categorizers',
+			                      wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING) as dlg:
+				if dlg.ShowModal() != wx.ID_YES:
+					return
+
 		with wx.DirDialog(self, 'Select destination folder') as dlg:
 			if dlg.ShowModal() != wx.ID_OK:
 				return
 			dest = dlg.GetPath()
-		errors = []
-		for i in checked:
-			cat = self._cats[i]
-			target = os.path.join(dest, cat.name)
-			try:
-				shutil.copytree(cat.path, target)
-			except Exception as e:
-				errors.append(f'{cat.name}: {e}')
-		if errors:
-			wx.MessageBox('Some exports failed:\n' + '\n'.join(errors),
-			              'Export Errors', wx.OK | wx.ICON_WARNING, self)
+
+		exported, failed = [], []
+		with wx.BusyCursor():
+			for cat in cats:
+				try:
+					exported.append(categorizer_library.export_categorizer(cat.path, dest))
+				except categorizer_library.LibraryActionError as e:
+					failed.append(f'- {cat.name}: {e}')
+
+		parts = []
+		if exported:
+			parts.append(f'Exported {len(exported)} to:\n' + '\n'.join(exported))
+		if failed:
+			parts.append(f'Not exported ({len(failed)}):\n' + '\n'.join(failed))
+		if not failed:
+			wx.MessageBox(parts[0], 'Export Complete', wx.OK | wx.ICON_INFORMATION, self)
 		else:
-			n = len(checked)
-			wx.MessageBox(
-				f"Exported {n} categorizer{'s' if n > 1 else ''} to:\n{dest}",
-				'Export Complete', wx.OK | wx.ICON_INFORMATION, self)
+			caption = 'Export Failed' if not exported else 'Export Partly Failed'
+			wx.MessageBox('\n\n'.join(parts), caption, wx.OK | wx.ICON_WARNING, self)
 
 	def _on_rename(self, event):
-		checked = self._get_checked_indices()
-		if len(checked) != 1:
+		cat = self._selected_categorizer()
+		if cat is None:
 			return
-		cat = self._cats[checked[0]]
-		with wx.TextEntryDialog(self, 'Enter new name:', 'Rename Categorizer',
-		                        cat.name) as dlg:
-			if dlg.ShowModal() != wx.ID_OK:
+		new_name = cat.name
+		while True:
+			with wx.TextEntryDialog(self, f'New name for "{cat.name}":',
+			                        'Rename Categorizer', new_name) as dlg:
+				if dlg.ShowModal() != wx.ID_OK:
+					return
+				new_name = dlg.GetValue().strip()
+			problem = categorizer_library.validate_new_name(
+				self._models_dir, cat.name, new_name)
+			if problem is None:
+				break
+			self._error(problem, 'Rename Categorizer')
+
+		message = (f'Rename "{cat.name}" to "{new_name}"?\n\n'
+		           'Anything that refers to the old folder path, such as saved '
+		           'settings or scripts, will need to use the new name.')
+		with wx.MessageDialog(self, message, 'Confirm Rename',
+		                      wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION) as dlg:
+			if dlg.ShowModal() != wx.ID_YES:
 				return
-			new_name = dlg.GetValue().strip()
-		if not new_name or new_name == cat.name:
-			return
-		new_path = os.path.join(self._models_dir, new_name)
-		if os.path.exists(new_path):
-			wx.MessageBox(f'A categorizer named "{new_name}" already exists.',
-			              'Rename Failed', wx.OK | wx.ICON_ERROR, self)
-			return
+
 		try:
-			os.rename(cat.path, new_path)
-		except OSError as e:
-			wx.MessageBox(f'Rename failed: {e}', 'Error',
-			              wx.OK | wx.ICON_ERROR, self)
+			categorizer_library.rename_categorizer(self._models_dir, cat.name, new_name)
+		except categorizer_library.LibraryActionError as e:
+			self._error(str(e), 'Rename Failed')
+			self._refresh()
 			return
-		self._refresh()
+		self._refresh(select_name=new_name)
 
 
 class InitialPanel(wx.Panel):
